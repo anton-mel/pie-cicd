@@ -14,6 +14,12 @@ every check in parallel, a reviewer approves, and the merge queue tests the
 PR on top of the current `main` before squashing it in. The PR title
 becomes the commit title, so write it as `area: what changed`.
 
+Once per clone, check your machine and install the git hook:
+
+```sh
+python3 ci/ci.py setup
+```
+
 Run what CI runs before you push:
 
 ```sh

@@ -8,6 +8,8 @@
     ci.py release binaries [--targets]   the nightly binary matrix
     ci.py release server npm|pypi        the pie-server addon/wheel matrix
     ci.py validate                       check ci.toml for mistakes
+    ci.py setup                          check this machine and install the git hook
+    ci.py doctor                         only check this machine
 
 CI and a laptop run the same script: `plan` embeds the output of `script`
 in each matrix entry, and `run` executes that same output locally.
@@ -302,11 +304,70 @@ def cmd_run(config: dict, names: list[str], platform_name: str | None, dry_run: 
     return 0
 
 
+def cmd_doctor() -> int:
+    """Whether this machine can run the checks, with a fix for each gap."""
+    problems = 0
+
+    def report(ok: bool, what: str, fix: str = "") -> None:
+        nonlocal problems
+        print(f"  {'ok  ' if ok else 'FAIL'}  {what}" + ("" if ok else f"\n        fix: {fix}"))
+        problems += 0 if ok else 1
+
+    def output(*cmd: str) -> str:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout.strip()
+        except OSError:
+            return ""
+
+    want = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    have = output("cargo", "--version")
+    report(want in have, f"cargo {want} (have: {have or 'none'})",
+           "install rustup from https://rustup.rs; it reads rust-toolchain.toml")
+    report(sys.version_info >= (3, 11), f"Python 3.11+ (running {sys.version.split()[0]})",
+           "install a newer Python, or `uv`")
+    node = output("node", "--version")
+    report(bool(node), f"Node.js for the javascript checks ({node or 'none'})", "install Node 22")
+    report(bool(shutil.which("bash")), "bash", "install bash")
+
+    # A C toolchain that links: build scripts need it. On macOS a Command
+    # Line Tools update can ship an SDK its own linker cannot read.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp, "t.c")
+        src.write_text("int main(void){return 0;}\n")
+        linked = subprocess.run(["cc", str(src), "-o", str(Path(tmp, "t"))], capture_output=True, text=True)
+        fix = "install a C compiler (build-essential, or Xcode Command Line Tools)"
+        if linked.returncode != 0 and host.system() == "Darwin":
+            sdks = sorted(Path("/Library/Developer/CommandLineTools/SDKs").glob("MacOSX[0-9]*.*.sdk"))
+            good = [sdk for sdk in reversed(sdks) if subprocess.run(
+                ["cc", str(src), "-o", str(Path(tmp, "t"))], capture_output=True, env={**os.environ, "SDKROOT": str(sdk)}
+            ).returncode == 0]
+            fix = ("reinstall the Command Line Tools (`sudo rm -rf /Library/Developer/CommandLineTools && "
+                   "xcode-select --install`)")
+            if good:
+                fix += f", or for now `export SDKROOT={good[0]}` in your shell profile"
+        report(linked.returncode == 0, "the C compiler links a program", fix)
+
+    hooks = output("git", "config", "--get", "core.hooksPath")
+    report(hooks == "ci/hooks", "git hook: no direct pushes to main, fmt before push",
+           "python3 ci/ci.py setup")
+    print("\nready." if problems == 0 else f"\n{problems} problem(s).")
+    return 1 if problems else 0
+
+
+def cmd_setup() -> int:
+    subprocess.run(["git", "config", "core.hooksPath", "ci/hooks"], cwd=ROOT, check=True)
+    print("installed the pre-push hook (git config core.hooksPath ci/hooks)\n")
+    return cmd_doctor()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list")
     sub.add_parser("validate")
+    sub.add_parser("setup")
+    sub.add_parser("doctor")
     r = sub.add_parser("run")
     r.add_argument("names", nargs="+")
     r.add_argument("-p", "--platform")
@@ -331,6 +392,10 @@ def main() -> int:
         print(e, file=sys.stderr)
         return 1
 
+    if args.command == "setup":
+        return cmd_setup()
+    if args.command == "doctor":
+        return cmd_doctor()
     if args.command == "validate":
         print(f"ci/ci.toml: {len(config['checks'])} checks on {len(config['platform'])} platforms, no problems")
         return 0

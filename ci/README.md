@@ -38,7 +38,19 @@ repository settings.
 
 ## Running checks locally
 
-The same script CI runs, on your machine:
+Once per clone:
+
+```sh
+python3 ci/ci.py setup
+```
+
+It checks that your machine can run the checks (Rust version, Python,
+Node, a C compiler that links) and says how to fix each gap. It also
+installs a git pre-push hook that refuses a direct push to main and runs
+`fmt` before every push; skip it once with `git push --no-verify`.
+`python3 ci/ci.py doctor` repeats the machine check.
+
+Then the same script CI runs, on your machine:
 
 ```sh
 python3 ci/ci.py list              # every platform, level and check
@@ -90,14 +102,16 @@ GitHub CLI as an admin:
 
 ```sh
 ci/apply-ruleset.sh pie-project/pie
-ci/apply-ruleset.sh <you>/<repo> --no-merge-queue   # personal repositories
+ci/apply-ruleset.sh <you>/<repo> --no-merge-queue --approvals 0   # a personal demo
 ```
 
 It requires a pull request with one approval, the `ci-ok` check,
 resolved review threads and a linear history, and it blocks force pushes
 and deleting main. Nobody can bypass it. The merge queue exists only for
 repositories owned by an organization; `--no-merge-queue` instead requires
-a PR to be up to date with main before it merges. The script also makes
+a PR to be up to date with main before it merges. A one-person repository
+needs `--approvals 0`, because GitHub does not let authors approve their
+own PRs. The script also makes
 merges squash-only, titled by the PR, and deletes merged branches.
 
 Publishing is gated separately: the `crates-io`, `npm` and `pypi`
@@ -111,6 +125,7 @@ environments should each list required reviewers under
 | `ci/ci.toml` | checks, platforms, levels and release machines |
 | `ci/ci.py` | plans the job matrix and runs checks locally |
 | `ci/ruleset.json`, `ci/apply-ruleset.sh` | branch protection for main |
+| `ci/hooks/pre-push` | the local hook `ci.py setup` installs |
 | `ci/lib/` | helpers the workflows call: crate lists, release uploads, the manylinux container setup |
 | `.github/workflows/ci.yml` | plans, runs the checks, reports `ci-ok` |
 | `.github/workflows/checks.yml` | runs a list of checks in parallel; shared by `ci.yml` and `gpu.yml` |
