@@ -188,6 +188,40 @@ def check(tokens: list[str], members: dict[str, dict], where: str) -> list[str]:
             )
     return problems
 
+def audit_ci_toml(members: dict[str, dict]) -> tuple[int, list[str]]:
+    """The same checks over `ci/ci.toml`, where most CI commands now live.
+
+    Each check is resolved once per platform that runs it, with that
+    platform's `{engines}` and vars filled in by ci.py itself. The release
+    targets' feature lists become the cargo commands the release workflows
+    run with them, since those workflows only see `${{ matrix... }}`.
+    """
+    sys.path.insert(0, str(ROOT / "ci"))
+    import ci  # noqa: E402  (ci/ci.py)
+
+    config = ci.load()
+    problems: list[str] = []
+    checked = 0
+    for platform in config["platform"]:
+        for check_name in ci.checks_at(platform, "nightly"):
+            where = f"ci/ci.toml: {platform['name']} / {check_name}"
+            for command in ci.commands(config, platform, check_name):
+                for tokens in commands(command):
+                    checked += 1
+                    problems += check(tokens, members, where)
+    release = config.get("release", {})
+    for b in release.get("binary", []):
+        checked += 1
+        problems += check(["cargo", "build", "-p", "pie", "--features", b["features"]], members,
+                                 f"ci/ci.toml: release.binary {b['label']}")
+    for s in release.get("server", []):
+        for crate in ("pie-server-node", "pie-server-py"):
+            checked += 1
+            problems += check(["cargo", "build", "-p", crate, "--no-default-features", "--features", s["features"]],
+                                     members, f"ci/ci.toml: release.server {s['npm']} ({crate})")
+    return checked, problems
+
+
 def main() -> int:
     members = workspace()
     problems: list[str] = []
@@ -214,6 +248,10 @@ def main() -> int:
                         checked += 1
                         problems += check(tokens, members, where)
 
+    ci_checked, ci_problems = audit_ci_toml(members)
+    checked += ci_checked
+    problems += ci_problems
+
     problems = list(dict.fromkeys(problems))
     if problems:
         print("workflow-ref-audit: a workflow names something cargo cannot resolve\n")
@@ -224,7 +262,7 @@ def main() -> int:
 
     print(
         f"workflow-ref-audit: {checked} cargo commands across "
-        f"{len(list(WORKFLOWS.glob('*.yml')))} workflows; every package, "
+        f"{len(list(WORKFLOWS.glob('*.yml')))} workflows and ci/ci.toml; every package, "
         f"feature and target resolves against {len(members)} members."
         + (f" {unresolved} expression(s) not resolvable and skipped." if unresolved else "")
     )

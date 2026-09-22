@@ -1,0 +1,41 @@
+name: GPU
+
+# Adding the `ci-cuda` label to a PR runs the GPU checks right away. Once
+# the label is on, every later push runs them inside CI as blocking checks,
+# and the nightly run always includes them. This lives apart from ci.yml
+# because a `labeled` trigger there would let any label restart CI.
+#
+# The self-hosted runner never runs a PR's code unless a maintainer, who
+# alone can add labels, asked for it.
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: gpu-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.event.label.name == 'ci-cuda'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      required: ${{ steps.plan.outputs.required }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: ci
+      - id: plan
+        run: python3 ci/ci.py plan pull_request --labels '["ci-cuda"]' --only-labeled
+
+  gpu:
+    needs: plan
+    if: needs.plan.outputs.required != '[]'
+    uses: ./.github/workflows/checks.yml
+    with:
+      legs: ${{ needs.plan.outputs.required }}

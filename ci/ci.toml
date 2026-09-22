@@ -1,0 +1,343 @@
+# Pie's CI, in one file.
+#
+# `[checks.*]` says what a check runs. `[[platform]]` says which machine
+# runs which checks, and at which level. `ci/ci.py` turns this file into the
+# GitHub Actions job matrix and runs the same checks on a laptop:
+#
+#   python3 ci/ci.py list                  what runs where
+#   python3 ci/ci.py run clippy            one check on this machine
+#   python3 ci/ci.py run pr                every PR-level check for this machine
+#
+# Levels are cumulative. A pull request runs `pr`; the merge queue and every
+# push to main run `pr` and `queue`; the nightly run adds `nightly`.
+#
+# A check listed in a platform's `advisory` still runs and still shows up on
+# the PR, but it does not block the merge. Use it for a platform that is
+# still being brought up, and move the check out once it is green.
+#
+# In `run`, `{engines}` is the platform's engine list joined with commas,
+# `{triple}` its Rust target, and any other `{name}` comes from the
+# platform's `vars` (falling back to `[vars]` below). Every command runs
+# under `bash -euo pipefail` from the repository root.
+
+[vars]
+# Crates the workspace test leaves out on a given platform, as
+# `--exclude <crate>` flags.
+test_exclude = ""
+
+# ---------------------------------------------------------------- checks --
+
+[checks.fmt]
+about = "rustfmt; engine-cuda and kernels-cuda are not rustfmt-clean yet"
+run = ["cargo fmt --check $(bash ci/lib/members.sh engine-cuda kernels-cuda)"]
+timeout = 15
+
+[checks.clippy]
+about = "clippy -D warnings on every crate; the server crates default to CUDA, so they lint without an engine"
+run = [
+  "cargo clippy --no-deps --all-targets $(bash ci/lib/members.sh engine-cuda pie-server-node pie-server-py) -- -D warnings",
+  "cargo clippy --no-deps --all-targets -p pie-server-node -p pie-server-py --no-default-features -- -D warnings",
+]
+timeout = 30
+
+[checks.clippy-apple]
+about = "engine-metal's device half is cfg(target_vendor = \"apple\"); clippy type-checks it from Linux"
+run = ["cargo clippy --no-deps --all-targets -p engine-metal --target aarch64-apple-darwin -- -D warnings"]
+timeout = 20
+
+[checks.build]
+about = "the pie binary with every engine this platform ships"
+engines = true
+apt = ["build-essential", "cmake", "ninja-build"]
+run = ["cargo build -p pie --features {engines}"]
+timeout = 45
+
+[checks.test]
+about = "build every target (so a bench or tests/*.rs that stopped compiling is red), then run the workspace tests"
+apt = ["build-essential", "cmake", "ninja-build"]
+run = [
+  "cargo build --workspace --all-targets --exclude pie-server-py --exclude pie-server-node --exclude engine-cuda {test_exclude}",
+  # worker's binary-facing tests need an engine feature; its library tests do not.
+  "cargo test --no-fail-fast --workspace --exclude pie-server-py --exclude pie-server-node --exclude worker --exclude engine-cuda {test_exclude}",
+  "cargo test --no-fail-fast -p worker --lib",
+]
+timeout = 60
+
+[checks.test-metal]
+about = "engine-metal's tests on Apple hardware; nothing else runs the Metal kernels"
+run = ["cargo test --no-fail-fast -p engine-metal"]
+timeout = 30
+
+[checks.engine-cuda]
+about = "both halves of engine-cuda build without a toolkit: cudarc loads the driver at run time and the device tests are #[ignore]d"
+apt = ["build-essential", "cmake", "ninja-build"]
+run = [
+  "cargo test --no-fail-fast -p engine-cuda --features cuda",
+  "cargo test --no-fail-fast -p engine-cuda",
+]
+timeout = 30
+
+[checks.no-engine]
+about = "the binary and the worker with no engine compiled in"
+run = [
+  "cargo build -p pie --no-default-features",
+  "cargo test --no-fail-fast -p worker --no-default-features",
+]
+timeout = 30
+
+[checks.audits]
+about = "the repository's own consistency audits (module reachability, features, workflow references, cfgs, Metal kernels)"
+python = true
+cache = false
+run = [
+  "python3 -m pip install --quiet pyyaml",
+  "python3 scripts/mod-reachability-audit.py",
+  "python3 scripts/feature-forward-audit.py",
+  "python3 scripts/workflow-ref-audit.py",
+  "python3 scripts/cfg-feature-audit.py",
+  "python3 scripts/metal-kernel-audit.py --one-way",
+]
+timeout = 15
+
+[checks.servers]
+about = "the Node addon and the Python wheel of pie-server, built without an engine"
+node = true
+python = true
+run = [
+  "cd javascript && npm ci --include=dev --ignore-scripts",
+  "cd javascript && bash server/build.sh dev --no-default-features",
+  "cd javascript && npm test -w server",
+  "cd javascript && npm pack --dry-run -w server",
+  "cd python/server && python3 -m pip install maturin",
+  "cd python/server && maturin build --no-default-features --out dist",
+  "cd python/server && python3 -m pip install -e ../client dist/*.whl",
+  "cd python/server && python3 -c 'from pie import _engine; from pie.config import Config; print(Config().to_toml())'",
+  "cd python/server && python3 -c 'import asyncio, pie.server as s; asyncio.run(s.Server(s.Config()).__aenter__())' 2>&1 | grep -q config && echo 'a bad config is refused'",
+]
+timeout = 30
+
+[checks.examples]
+about = "the example inferlets; `examples` is its own workspace, so nothing else compiles them"
+cache_paths = ["examples/target"]
+env = { RUSTFLAGS = "-D warnings" }
+run = ["cargo check --target wasm32-wasip2 --manifest-path examples/Cargo.toml"]
+timeout = 20
+
+[checks.packages]
+about = "the Python and JavaScript inferlet and client packages; the interface gate and shared goldens tie their stub bindings to the real WIT"
+node = true
+python = true
+cache = false
+run = [
+  "bash scripts/check-inferlet-interfaces.sh",
+  "cmp crates/eta-dsl/tests/goldens/inferlet_containers.txt python/inferlet/tests/goldens/eta_containers.txt",
+  "python3 -m pip install --quiet pytest -e python/client",
+  "PYTHONPATH=python/inferlet/src python3 -m pytest -q python/inferlet/tests",
+  "python3 -m pytest -q python/client/tests",
+  "cd javascript && npm ci --include=dev --ignore-scripts",
+  "cd javascript && npm run generate-bindings -w inferlet",
+  "cd javascript && npx -w inferlet tsc --noEmit",
+  "cd javascript && npm test --workspaces --if-present",
+]
+timeout = 15
+
+[checks.browser]
+about = "the wasm32 browser build and its native gate"
+node = true
+cache_paths = ["target-wasm"]
+run = [
+  "cd javascript && npm ci --include=dev --ignore-scripts",
+  "./scripts/browser-check.sh",
+]
+timeout = 40
+
+[checks.lavapipe]
+about = "the wgpu engine serving a random-weight model on Mesa's software Vulkan"
+node = true
+apt = ["mesa-vulkan-drivers"]
+cache_paths = ["~/qwen35-tokenizer"]
+run = [
+  "mkdir -p ~/qwen35-tokenizer",
+  "for f in tokenizer.json tokenizer_config.json chat_template.jinja; do [ -s ~/qwen35-tokenizer/$f ] || curl -fsSL --retry 3 -o ~/qwen35-tokenizer/$f https://huggingface.co/Qwen/Qwen3.5-0.8B/resolve/main/$f; done",
+  "cd javascript && npm ci --include=dev --ignore-scripts",
+  "PIE_TOKENIZER_DIR=$HOME/qwen35-tokenizer ./tests/browser/tools/ci-lavapipe.sh",
+]
+timeout = 40
+
+[checks.tint]
+about = "every wgpu kernel through Chrome's Tint compiler on SwiftShader"
+node = true
+run = [
+  "npm install --prefix tests/browser/tools playwright@1.63.0",
+  "npx --prefix tests/browser/tools playwright install --with-deps chromium",
+  "cargo run -q -p kernels-wgpu --example dump_wgsl -- crates/kernels-wgpu/tools/wgsl",
+  "PIE_CHROME_ARGS='--use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader' node tests/browser/tools/headless.mjs . crates/kernels-wgpu/tools/wgsl-check.html --timeout 900000",
+]
+timeout = 30
+
+[checks.gpu-cuda]
+about = "engine-cuda's device tests on a real NVIDIA GPU, and a binary that links no CUDA shared library"
+cache = false
+run = [
+  "cargo test -p engine-cuda --features cuda --no-run --all-targets",
+  "cargo test --no-fail-fast -p engine-cuda --features cuda -- --ignored",
+  "cargo build -p pie --features cuda",
+  "ldd target/debug/pie",
+  "! ldd target/debug/pie | grep -E 'libcudart|libcublas|libcublasLt'",
+]
+timeout = 60
+
+# ------------------------------------------------------------- platforms --
+
+[[platform]]
+name = "linux-x64"
+runner = "ubuntu-latest"
+triple = "x86_64-unknown-linux-gnu"
+engines = ["cuda", "vulkan", "wgpu"]
+pr = ["fmt", "clippy", "clippy-apple", "build", "test", "engine-cuda", "no-engine",
+      "audits", "servers", "examples", "packages", "browser", "lavapipe", "tint"]
+
+[[platform]]
+name = "macos-arm64"
+runner = "macos-15"
+triple = "aarch64-apple-darwin"
+engines = ["metal", "wgpu"]
+vars = { test_exclude = "--exclude engine-metal" }
+pr = ["build", "test", "no-engine", "test-metal"]
+# GitHub's macOS runners are virtual machines, and whether the Metal
+# kernels run correctly there is not yet established. One Metal test also
+# fails on real Apple hardware today.
+advisory = ["test-metal"]
+
+[[platform]]
+name = "windows-x64"
+runner = "windows-latest"
+triple = "x86_64-pc-windows-msvc"
+engines = ["vulkan"]
+queue = ["build", "test"]
+advisory = ["test"]
+
+[[platform]]
+name = "linux-arm64"
+runner = "ubuntu-24.04-arm"
+triple = "aarch64-unknown-linux-gnu"
+engines = ["cuda", "vulkan", "wgpu"]
+queue = ["build", "test"]
+advisory = ["test"]
+
+# The one machine with a GPU. It never runs on its own for a PR, because
+# the self-hosted runner must not execute unreviewed code: a maintainer
+# adds the `ci-cuda` label, which runs every check this platform lists.
+[[platform]]
+name = "cuda-gpu"
+runner = ["self-hosted", "cuda"]
+triple = "x86_64-unknown-linux-gnu"
+engines = ["cuda"]
+self_hosted = true
+label = "ci-cuda"
+nightly = ["gpu-cuda"]
+
+# -------------------------------------------------------------- releases --
+#
+# The machines the release workflows build on. `build.yml` publishes one
+# binary per engine; the npm addon and the PyPI wheel of pie-server share
+# one build per platform with every engine that platform supports.
+
+# Linux CUDA binaries build in the manylinux_2_28 container (glibc 2.28
+# floor); device code is NVRTC-compiled at run time, so one build per
+# architecture serves every compute capability.
+[release]
+cuda_container = "nvidia/cuda:13.0.0-devel-rockylinux8"
+
+[[release.binary]]
+label = "aarch64-macos-metal"
+runner = "macos-15"
+triple = "aarch64-apple-darwin"
+features = "metal"
+
+[[release.binary]]
+label = "aarch64-macos-wgpu"
+runner = "macos-15"
+triple = "aarch64-apple-darwin"
+features = "wgpu"
+
+[[release.binary]]
+label = "x86_64-windows-cuda"
+runner = "windows-large-x64"
+triple = "x86_64-pc-windows-msvc"
+features = "cuda"
+
+[[release.binary]]
+label = "x86_64-windows-vulkan"
+runner = "windows-latest"
+triple = "x86_64-pc-windows-msvc"
+features = "vulkan"
+
+[[release.binary]]
+label = "x86_64-linux-vulkan"
+runner = "ubuntu-latest"
+triple = "x86_64-unknown-linux-gnu"
+features = "vulkan"
+
+[[release.binary]]
+label = "x86_64-linux-wgpu"
+runner = "ubuntu-latest"
+triple = "x86_64-unknown-linux-gnu"
+features = "wgpu"
+
+[[release.binary]]
+label = "aarch64-linux-vulkan"
+runner = "ubuntu-large-arm64"
+triple = "aarch64-unknown-linux-gnu"
+features = "vulkan"
+
+[[release.binary]]
+label = "x86_64-linux-cuda13.0"
+runner = "ubuntu-large-x64"
+triple = "x86_64-unknown-linux-gnu"
+features = "cuda"
+cuda_container = true
+
+[[release.binary]]
+label = "aarch64-linux-cuda13.0"
+runner = "ubuntu-large-arm64"
+triple = "aarch64-unknown-linux-gnu"
+features = "cuda"
+cuda_container = true
+
+# Linux on ubuntu-22.04 (glibc 2.35, so manylinux_2_35): the Slang release
+# that compiles the Vulkan kernels needs 2.34, which rules out the 2.28
+# container.
+[[release.server]]
+npm = "linux-x64"
+wheel = "linux-x86_64"
+runner = "ubuntu-22.04"
+triple = "x86_64-unknown-linux-gnu"
+features = "cuda,vulkan,wgpu"
+lib = "libpie_server.so"
+manylinux = "manylinux_2_35"
+
+[[release.server]]
+npm = "linux-arm64"
+wheel = "linux-aarch64"
+runner = "ubuntu-22.04-arm"
+triple = "aarch64-unknown-linux-gnu"
+features = "cuda,vulkan,wgpu"
+lib = "libpie_server.so"
+manylinux = "manylinux_2_35"
+
+[[release.server]]
+npm = "darwin-arm64"
+wheel = "macos-arm64"
+runner = "macos-15"
+triple = "aarch64-apple-darwin"
+features = "metal,wgpu"
+lib = "libpie_server.dylib"
+
+[[release.server]]
+npm = "win32-x64"
+wheel = "windows-x64"
+runner = "windows-large-x64"
+triple = "x86_64-pc-windows-msvc"
+features = "cuda,vulkan"
+lib = "pie_server.dll"

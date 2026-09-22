@@ -1,0 +1,55 @@
+name: checks
+
+# Runs a list of legs from `ci/ci.py plan`, one parallel job each. Called by
+# ci.yml and gpu.yml; never triggered on its own.
+
+on:
+  workflow_call:
+    inputs:
+      legs:
+        description: JSON list of matrix entries from `ci/ci.py plan`
+        type: string
+        required: true
+      advisory:
+        description: A failure here does not fail the caller
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NPM_CONFIG_FUND: 'false'
+  NPM_CONFIG_AUDIT: 'false'
+
+jobs:
+  leg:
+    name: ${{ matrix.leg.name }}
+    continue-on-error: ${{ inputs.advisory }}
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(inputs.legs) }}
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: ${{ matrix.leg.timeout }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          triple: ${{ matrix.leg.triple }}
+          features: ${{ matrix.leg.features }}
+          apt: ${{ matrix.leg.apt }}
+          node: ${{ matrix.leg.node }}
+          python: ${{ matrix.leg.python }}
+          cache-key: ${{ matrix.leg.cache_key }}
+          cache-paths: ${{ matrix.leg.cache_paths }}
+          cache-save: ${{ github.ref == 'refs/heads/main' }}
+      # The script is exactly what `python3 ci/ci.py run <check>` runs locally.
+      - name: ${{ matrix.leg.check }}
+        shell: bash
+        env:
+          SCRIPT: ${{ matrix.leg.script }}
+        run: |
+          printf '%s' "$SCRIPT" > "$RUNNER_TEMP/check.sh"
+          bash "$RUNNER_TEMP/check.sh"

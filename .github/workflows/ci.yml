@@ -1,251 +1,86 @@
 name: CI
 
-# The toolchain is `rust-toolchain.toml` (rustup installs it on the first
-# cargo call); the `dtolnay/rust-toolchain` steps only decide what the
-# action downloads.
+# What runs where is defined in `ci/ci.toml`, not here. This workflow only
+# turns that file into jobs: `plan` reads it, `required` runs every blocking
+# leg in parallel, `advisory` runs the non-blocking ones, and `ci-ok` is the
+# single status check that branch protection requires.
+#
+# A PR runs the `pr` level. The merge queue and pushes to main add `queue`,
+# so a change is tested on top of the current main before it lands. The
+# nightly schedule adds `nightly`. Run any check locally with
+# `python3 ci/ci.py run <check>`; see `ci/README.md`.
 
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
+    inputs:
+      level:
+        description: Level to run
+        type: choice
+        options: [pr, queue, nightly]
+        default: nightly
+
+# A new push to a PR cancels that PR's previous run. Main, the merge queue
+# and the nightly always finish, so every commit on main has a result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
-env:
-  NPM_CONFIG_FUND: 'false'
-  NPM_CONFIG_AUDIT: 'false'
-
 jobs:
-  lint:
+  plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      required: ${{ steps.plan.outputs.required }}
+      advisory: ${{ steps.plan.outputs.advisory }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
         with:
-          cache-key: ${{ runner.os }}-lint
-      # engine-cuda and kernels-cuda are not rustfmt-clean; engine-cuda has
-      # no default engine feature and is tested by `verify`; the two server
-      # crates default to CUDA and lint without an engine below.
-      - name: cargo fmt
-        run: cargo fmt --check $(bash scripts/ci/members.sh engine-cuda kernels-cuda)
-      - name: cargo clippy
-        run: cargo clippy --no-deps --all-targets $(bash scripts/ci/members.sh engine-cuda pie-server-node pie-server-py) -- -D warnings
-      - name: cargo clippy (servers, no engine)
-        run: cargo clippy --no-deps --all-targets -p pie-server-node -p pie-server-py --no-default-features -- -D warnings
-      # engine-metal's device half is `cfg(target_vendor = "apple")`; clippy
-      # type-checks it for that target without a Mac.
-      - name: cargo clippy (engine-metal, Apple half)
-        run: cargo clippy --no-deps --all-targets -p engine-metal --target aarch64-apple-darwin -- -D warnings
-
-  verify:
-    name: build + test (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build python3-yaml
-      - uses: ./.github/actions/toolchain
-        with:
-          cache-key: ${{ runner.os }}-verify
-      # `--all-targets` so benches and `tests/*.rs` that stopped compiling
-      # are red here rather than nowhere.
-      - name: cargo build (all targets)
-        run: cargo build --workspace --all-targets --exclude pie-server-py --exclude pie-server-node --exclude engine-cuda
-      # worker's binary-facing tests need an engine feature; its library
-      # tests do not.
-      - name: cargo test
-        run: |
-          cargo test --workspace --exclude pie-server-py --exclude pie-server-node --exclude worker --exclude engine-cuda
-          cargo test -p worker --lib
-      # Both halves of engine-cuda build without a toolkit: cudarc loads the
-      # driver at run time and the device tests are `#[ignore]`d.
-      - name: cargo test (engine-cuda, with and without the cuda feature)
-        run: |
-          cargo test -p engine-cuda --features cuda
-          cargo test -p engine-cuda
-      - name: audits
-        run: |
-          python3 scripts/mod-reachability-audit.py
-          python3 scripts/feature-forward-audit.py
-          python3 scripts/workflow-ref-audit.py
-          python3 scripts/cfg-feature-audit.py
-          python3 scripts/metal-kernel-audit.py --one-way
-
-  no-engine:
-    name: no engine (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-        with:
-          cache-key: ${{ runner.os }}-no-engine
-      - run: |
-          cargo build -p pie --no-default-features
-          cargo test -p worker --no-default-features
-
-  servers:
-    name: pie-server (node addon + python wheel, no engine)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-        with:
-          cache-key: ${{ runner.os }}-servers
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: node addon
-        working-directory: javascript
-        run: |
-          npm ci --include=dev --ignore-scripts
-          bash server/build.sh dev --no-default-features
-          npm test -w server
-          npm pack --dry-run -w server
-      - name: python wheel
-        working-directory: python/server
-        run: |
-          python -m pip install maturin
-          maturin build --no-default-features --out dist
-          python -m pip install -e ../client dist/*.whl
-          python -c "from pie import _engine; from pie.config import Config; print(Config().to_toml())"
-          python -c "import asyncio, pie.server as s; asyncio.run(s.Server(s.Config()).__aenter__())" 2>&1 | grep -q 'config' && echo "a bad config is refused"
-
-  # `examples` is its own workspace, so `cargo build --workspace` never
-  # touches the inferlet library's only consumers.
-  examples:
-    name: examples (wasm32-wasip2)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-        with:
-          triple: wasm32-wasip2
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            examples/target
-          key: ${{ runner.os }}-examples-${{ hashFiles('examples/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-examples-
-      - run: cargo check --target wasm32-wasip2 --manifest-path examples/Cargo.toml
+          sparse-checkout: ci
+      - id: plan
         env:
-          RUSTFLAGS: -D warnings
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          LEVEL: ${{ inputs.level }}
+        run: python3 ci/ci.py plan "$EVENT" --labels "$LABELS" ${LEVEL:+--level "$LEVEL"}
 
-  packages:
-    name: python + javascript packages (inferlet, client)
+  required:
+    needs: plan
+    if: needs.plan.outputs.required != '[]'
+    uses: ./.github/workflows/checks.yml
+    with:
+      legs: ${{ needs.plan.outputs.required }}
+
+  advisory:
+    needs: plan
+    if: needs.plan.outputs.advisory != '[]'
+    uses: ./.github/workflows/checks.yml
+    with:
+      legs: ${{ needs.plan.outputs.advisory }}
+      advisory: true
+
+  # The one required status check. It runs even when a leg failed, so a red
+  # leg can never be mistaken for a missing one.
+  ci-ok:
+    if: always()
+    needs: [plan, required]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-      # The unit suites run against stub WIT bindings; the interface gate
-      # and the shared goldens tie them to the real world.
-      - run: |
-          bash scripts/check-inferlet-interfaces.sh
-          cmp crates/eta-dsl/tests/goldens/inferlet_containers.txt python/inferlet/tests/goldens/eta_containers.txt
-      - name: python
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          REQUIRED: ${{ needs.required.result }}
+          LEGS: ${{ needs.plan.outputs.required }}
         run: |
-          python -m pip install pytest -e python/client
-          PYTHONPATH=python/inferlet/src python -m pytest -q python/inferlet/tests
-          python -m pytest -q python/client/tests
-      - name: javascript
-        working-directory: javascript
-        run: |
-          npm ci --include=dev --ignore-scripts
-          npm run generate-bindings -w inferlet
-          npx -w inferlet tsc --noEmit
-          npm test --workspaces --if-present
-
-  browser:
-    name: browser (wasm32 + native gate)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            target-wasm
-          key: ${{ runner.os }}-browser-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-browser-
-      - run: npm ci --include=dev --ignore-scripts
-        working-directory: javascript
-      - run: ./scripts/browser-check.sh
-
-  wgpu-lavapipe:
-    name: wgpu engine on lavapipe (no GPU)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-        with:
-          triple: wasm32-wasip2
-          cache-key: ${{ runner.os }}-lavapipe
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - uses: actions/cache@v5
-        with:
-          path: ~/qwen35-tokenizer
-          key: qwen35-tokenizer-v1
-      - run: |
-          mkdir -p ~/qwen35-tokenizer
-          for f in tokenizer.json tokenizer_config.json chat_template.jinja; do
-            [ -s ~/qwen35-tokenizer/$f ] || curl -sSL -o ~/qwen35-tokenizer/$f https://huggingface.co/Qwen/Qwen3.5-0.8B/resolve/main/$f
-          done
-      - run: npm ci --include=dev --ignore-scripts
-        working-directory: javascript
-      - run: PIE_TOKENIZER_DIR=$HOME/qwen35-tokenizer ./tests/browser/tools/ci-lavapipe.sh
-
-  tint-swiftshader:
-    name: kernels through Tint (SwiftShader)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/toolchain
-        with:
-          cache-key: ${{ runner.os }}-tint
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-      - run: |
-          npm install --prefix tests/browser/tools playwright@1.63.0
-          npx --prefix tests/browser/tools playwright install --with-deps chromium
-      - run: cargo run -q -p kernels-wgpu --example dump_wgsl -- crates/kernels-wgpu/tools/wgsl
-      - run: PIE_CHROME_ARGS="--use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader" node tests/browser/tools/headless.mjs . crates/kernels-wgpu/tools/wgsl-check.html --timeout 900000
-
-  # The one runner with a GPU; opt in with the `ci-cuda` label.
-  cuda:
-    name: engine-cuda on hardware
-    runs-on: [self-hosted, cuda]
-    if: contains(github.event.pull_request.labels.*.name, 'ci-cuda')
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p engine-cuda --features cuda --no-run --all-targets
-      - run: cargo test -p engine-cuda --features cuda -- --ignored
-      - run: cargo build -p pie --features cuda
-      - name: no CUDA shared library is linked
-        run: |
-          ldd target/debug/pie
-          ! ldd target/debug/pie | grep -E "libcudart|libcublas|libcublasLt"
+          echo "plan: $PLAN, required legs: $REQUIRED"
+          [ "$PLAN" = success ] || { echo "::error::the plan job did not succeed"; exit 1; }
+          [ "$LEGS" = '[]' ] && exit 0
+          [ "$REQUIRED" = success ] || { echo "::error::a required leg did not pass"; exit 1; }
