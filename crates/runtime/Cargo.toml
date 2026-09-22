@@ -51,7 +51,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 blake3 = "1.8.5"
-fancy-regex = "0.18.0"
+fancy-regex = "0.19.2"
 async-trait = "0.1.91"
 wasm-metadata = "0.254.0"
 cudarc = { version = "0.19.8", optional = true, default-features = false, features = [
