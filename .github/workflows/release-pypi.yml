@@ -28,7 +28,7 @@ jobs:
       DIR: python/${{ inputs.package == 'pie-client' && 'client' || 'inferlet' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade build pytest
@@ -89,7 +89,7 @@ jobs:
           triple: ${{ matrix.target.triple }}
           features: ${{ matrix.target.features }}
           cache-key: release-pie-server-${{ matrix.target.label }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - shell: bash
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install maturin && maturin sdist --out dist
@@ -135,7 +135,7 @@ jobs:
           pattern: dist-*
           merge-multiple: true
           path: dist
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade twine && ls -la dist && python -m twine check dist/*
