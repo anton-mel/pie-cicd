@@ -43,7 +43,7 @@ jobs:
       - run: npm ci --include=dev
         working-directory: javascript
       - run: bash javascript/browser/build.sh min
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: browser-dist
           path: javascript/browser/dist
@@ -75,7 +75,7 @@ jobs:
         run: |
           cargo build --profile release-min --target ${{ matrix.target.triple }} -p pie-server-node --no-default-features --features ${{ matrix.target.features }}
           cp "${CARGO_TARGET_DIR:-target}/${{ matrix.target.triple }}/release-min/${{ matrix.target.lib }}" javascript/server/npm/${{ matrix.target.npm }}/pie-server.node
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: addon-${{ matrix.target.npm }}
           path: javascript/server/npm/${{ matrix.target.npm }}/pie-server.node

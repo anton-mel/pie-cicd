@@ -61,7 +61,7 @@ jobs:
             -p "$RUNNER_TEMP/app" -p python/inferlet/src -p python/inferlet/src/inferlet/bindings \
             app -o "$RUNNER_TEMP/app/app.wasm"
       - run: python -m build "$DIR"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-pure
           path: ${{ env.DIR }}/dist
@@ -99,7 +99,7 @@ jobs:
           python3 -m maturin build --profile release-min --target ${{ matrix.target.triple }} \
             --no-default-features --features ${{ matrix.target.features }} --out dist \
             ${{ matrix.target.manylinux && format('--compatibility {0}', matrix.target.manylinux) || '' }}
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target.label }}
           path: python/server/dist
@@ -115,7 +115,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install maturin && maturin sdist --out dist
         working-directory: python/server
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-sdist
           path: python/server/dist
