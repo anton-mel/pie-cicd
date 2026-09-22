@@ -112,7 +112,8 @@ run = [
   "cd python/server && maturin build --no-default-features --out dist",
   "cd python/server && python3 -m pip install -e ../client dist/*.whl",
   "cd python/server && python3 -c 'from pie import _engine; from pie.config import Config; print(Config().to_toml())'",
-  "cd python/server && python3 -c 'import asyncio, pie.server as s; asyncio.run(s.Server(s.Config()).__aenter__())' 2>&1 | grep -q config && echo 'a bad config is refused'",
+  # The server must refuse the default (empty) config, so python is expected to fail here.
+  "cd python/server && { python3 -c 'import asyncio, pie.server as s; asyncio.run(s.Server(s.Config()).__aenter__())' 2>&1 || true; } | grep -q config && echo 'a bad config is refused'",
 ]
 timeout = 30
 
