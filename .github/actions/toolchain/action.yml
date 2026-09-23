@@ -1,9 +1,9 @@
 name: toolchain
-description: Rust plus what the selected engine features need, and the cargo cache.
+description: Rust plus what the selected engines and check need (apt packages, Node, Python), and the cargo cache.
 
 inputs:
   features:
-    description: Comma-separated engine features (cuda, metal, vulkan, wgpu).
+    description: Comma-separated engine features (cuda, metal, vulkan, wgpu); decides whether Slang and the CUDA toolkit are installed.
     default: ''
   triple:
     description: Rust target triple to install.
@@ -11,16 +11,35 @@ inputs:
   manylinux:
     description: "'true' inside the rockylinux8 container: bootstrap it instead of installing Rust."
     default: 'false'
+  apt:
+    description: Space-separated apt packages to install (Linux only).
+    default: ''
+  node:
+    description: "'true' installs Node 22 with the npm cache of javascript/package-lock.json."
+    default: 'false'
+  python:
+    description: "'true' installs Python 3.12."
+    default: 'false'
   cache-key:
     description: Cache key prefix; empty skips the cache.
     default: ''
+  cache-paths:
+    description: Extra paths to cache next to the cargo registry and target directory, one per line.
+    default: ''
+  cache-save:
+    description: "'false' only restores the cache. CI saves from main alone, so PR runs never evict main's caches from the repository's 10 GB."
+    default: 'true'
 
 runs:
   using: composite
   steps:
+    - if: inputs.apt != '' && runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ${{ inputs.apt }}
+
     - if: inputs.manylinux == 'true'
       shell: bash
-      run: bash scripts/ci/rockylinux8-bootstrap.sh ${{ inputs.triple }}
+      run: bash ci/lib/rockylinux8-bootstrap.sh ${{ inputs.triple }}
 
     - if: inputs.manylinux != 'true'
       uses: dtolnay/rust-toolchain@stable
@@ -31,6 +50,18 @@ runs:
       shell: bash
       run: brew install cmake ninja libomp
 
+    - if: inputs.node == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: javascript/package-lock.json
+
+    - if: inputs.python == 'true'
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
     # The Vulkan kernels compile to SPIR-V at build time.
     - if: contains(inputs.features, 'vulkan')
       shell: bash
@@ -40,7 +71,7 @@ runs:
         set -euo pipefail
         arch=x86_64; [[ "$(uname -m)" =~ ^(aarch64|arm64)$ ]] && arch=aarch64
         if [[ "$RUNNER_OS" == Windows ]]; then asset="slang-${SLANG_VERSION}-windows-${arch}.zip"; else asset="slang-${SLANG_VERSION}-linux-${arch}.tar.gz"; fi
-        curl -fsSL -o "${RUNNER_TEMP}/${asset}" "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${asset}"
+        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${asset}" "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${asset}"
         mkdir -p "${RUNNER_TEMP}/slang"
         case "$asset" in
           *.zip) 7z x -o"${RUNNER_TEMP}/slang" "${RUNNER_TEMP}/${asset}" >/dev/null; echo "PIE_SLANGC=${RUNNER_TEMP}/slang/bin/slangc.exe" >> "$GITHUB_ENV" ;;
@@ -49,12 +80,12 @@ runs:
 
     # The toolkit must match the CUDA 13 ABI engine-cuda's cudarc line pins.
     - if: runner.os == 'Windows' && contains(inputs.features, 'cuda')
-      uses: Jimver/cuda-toolkit@v0.2.35
+      uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
       with:
         cuda: '13.0.0'
 
     - if: runner.os == 'Windows' && contains(inputs.features, 'cuda')
-      uses: TheMrMilchmann/setup-msvc-dev@v4.0.0
+      uses: TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c # v4.0.0
       with:
         arch: x64
 
@@ -68,7 +99,7 @@ runs:
         echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
         rm -f /usr/bin/link /usr/bin/link.exe || true
 
-    - if: inputs.cache-key != ''
+    - if: inputs.cache-key != '' && inputs.cache-save == 'true'
       uses: actions/cache@v5
       with:
         path: |
@@ -76,5 +107,18 @@ runs:
           ~/.cargo/git
           target
           C:/t/pie
+          ${{ inputs.cache-paths }}
+        key: ${{ inputs.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ inputs.cache-key }}-
+
+    - if: inputs.cache-key != '' && inputs.cache-save != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+          C:/t/pie
+          ${{ inputs.cache-paths }}
         key: ${{ inputs.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ inputs.cache-key }}-

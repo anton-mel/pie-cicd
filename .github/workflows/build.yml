@@ -2,7 +2,8 @@ name: Publish Nightly
 
 # Rewrites the rolling pre-release: every asset is uploaded with --clobber,
 # so download URLs stay stable. `targets` filters the binary matrix by label
-# substring (`cuda`, `macos`, `x86_64-linux-vulkan`, ...).
+# substring (`cuda`, `macos`, `x86_64-linux-vulkan`, ...); the targets
+# themselves are defined in ci/ci.toml.
 
 on:
   workflow_dispatch:
@@ -27,40 +28,17 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.plan.outputs.targets }}
+      targets: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
-      - run: bash scripts/ci/release.sh ensure "${{ inputs.tag }}"
+      - run: bash ci/lib/release.sh ensure "${{ inputs.tag }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The targets live in ci/ci.toml under [[release.binary]].
       - id: plan
-        shell: python
-        run: |
-          import json, os
-          # Linux CUDA builds in the manylinux_2_28 container (glibc 2.28 floor);
-          # device code is NVRTC-compiled at run time, so one build per
-          # architecture serves every compute capability.
-          cuda = "nvidia/cuda:13.0.0-devel-rockylinux8"
-          rows = [
-            dict(label="aarch64-macos-metal",    runner="macos-15",           triple="aarch64-apple-darwin",       features="metal"),
-            dict(label="aarch64-macos-wgpu",     runner="macos-15",           triple="aarch64-apple-darwin",       features="wgpu"),
-            dict(label="x86_64-windows-cuda",    runner="windows-large-x64",  triple="x86_64-pc-windows-msvc",     features="cuda"),
-            dict(label="x86_64-windows-vulkan",  runner="windows-latest",     triple="x86_64-pc-windows-msvc",     features="vulkan"),
-            dict(label="x86_64-linux-vulkan",    runner="ubuntu-latest",      triple="x86_64-unknown-linux-gnu",   features="vulkan"),
-            dict(label="x86_64-linux-wgpu",      runner="ubuntu-latest",      triple="x86_64-unknown-linux-gnu",   features="wgpu"),
-            dict(label="aarch64-linux-vulkan",   runner="ubuntu-large-arm64", triple="aarch64-unknown-linux-gnu",  features="vulkan"),
-            dict(label="x86_64-linux-cuda13.0",  runner="ubuntu-large-x64",   triple="x86_64-unknown-linux-gnu",   features="cuda", container=cuda),
-            dict(label="aarch64-linux-cuda13.0", runner="ubuntu-large-arm64", triple="aarch64-unknown-linux-gnu",  features="cuda", container=cuda),
-          ]
-          want = [w.strip() for w in "${{ inputs.targets }}".split(",") if w.strip()]
-          if want == ["all"]:
-              chosen = rows
-          elif want == ["none"]:
-              chosen = []
-          else:
-              chosen = [r for r in rows if any(w in r["label"] for w in want)]
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"targets={json.dumps(chosen)}\n")
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: python3 ci/ci.py release binaries --targets "$TARGETS"
 
   binaries:
     needs: plan
@@ -96,7 +74,7 @@ jobs:
             asset="pie-${{ matrix.target.label }}.tar.gz"; tar -C "$bin" -czf "$asset" pie
           fi
           ls -la "$asset"
-          bash scripts/ci/release.sh upload "${{ inputs.tag }}" "$asset"
+          bash ci/lib/release.sh upload "${{ inputs.tag }}" "$asset"
 
   # Pure wasm: one asset per language serves every platform. install.sh
   # extracts them into PIE_HOME; the built-in inferlets need none, being
@@ -110,13 +88,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - run: uv tool install componentize-py
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
       - run: bash scripts/build-languages.sh target/languages
-      - run: bash scripts/ci/release.sh upload "${{ inputs.tag }}" target/languages/pie-language-python.tar.gz target/languages/pie-language-javascript.tar.gz
+      - run: bash ci/lib/release.sh upload "${{ inputs.tag }}" target/languages/pie-language-python.tar.gz target/languages/pie-language-javascript.tar.gz
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -126,6 +104,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: bash scripts/ci/release.sh ensure "${{ inputs.tag }}"
+      - run: bash ci/lib/release.sh ensure "${{ inputs.tag }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Installed by `python3 ci/ci.py setup` (git config core.hooksPath ci/hooks).
+# Refuses a direct push to main, then runs the fast checks. Skip it once
+# with `git push --no-verify`.
+set -euo pipefail
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "pre-push: main only changes through a pull request." >&2
+    echo "          push a branch instead: git switch -c <name> && git push -u origin <name>" >&2
+    exit 1
+  fi
+done
+
+cd "$(git rev-parse --show-toplevel)"
+python3 ci/ci.py run fmt

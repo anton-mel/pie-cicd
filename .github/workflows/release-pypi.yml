@@ -67,19 +67,26 @@ jobs:
           path: ${{ env.DIR }}/dist
           if-no-files-found: error
 
-  wheel:
+  # The platforms live in ci/ci.toml under [[release.server]].
+  plan:
     if: inputs.package == 'pie-server'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: ci
+      - id: plan
+        run: python3 ci/ci.py release server pypi
+
+  wheel:
+    needs: plan
     name: wheel (${{ matrix.target.label }})
     strategy:
       fail-fast: false
       matrix:
-        target:
-          # Linux on ubuntu-22.04 (glibc 2.35, so manylinux_2_35): the Slang
-          # release that compiles the Vulkan kernels needs 2.34.
-          - { label: linux-x86_64,  runner: ubuntu-22.04,       triple: x86_64-unknown-linux-gnu,  features: 'cuda,vulkan,wgpu', manylinux: manylinux_2_35 }
-          - { label: linux-aarch64, runner: ubuntu-22.04-arm,   triple: aarch64-unknown-linux-gnu, features: 'cuda,vulkan,wgpu', manylinux: manylinux_2_35 }
-          - { label: macos-arm64,   runner: macos-15,           triple: aarch64-apple-darwin,      features: 'metal,wgpu' }
-          - { label: windows-x64,   runner: windows-large-x64,  triple: x86_64-pc-windows-msvc,    features: 'cuda,vulkan' }
+        target: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 120
     steps:
@@ -148,6 +155,6 @@ jobs:
             pie-server) smoke/bin/pip install dist/pie_server-*-manylinux*x86_64.whl && smoke/bin/python -c "from pie import _engine; from pie.config import Config; print(Config().to_toml())" ;;
           esac
       - if: inputs.dry_run == false
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}

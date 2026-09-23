@@ -49,19 +49,26 @@ jobs:
           path: javascript/browser/dist
           if-no-files-found: error
 
-  addon:
+  # The platforms live in ci/ci.toml under [[release.server]].
+  plan:
     if: inputs.package == 'server'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: ci
+      - id: plan
+        run: python3 ci/ci.py release server npm
+
+  addon:
+    needs: plan
     name: addon (${{ matrix.target.npm }})
     strategy:
       fail-fast: false
       matrix:
-        target:
-          # Linux on ubuntu-22.04 (glibc 2.35): the Slang release that compiles
-          # the Vulkan kernels needs 2.34, which rules out the 2.28 container.
-          - { npm: linux-x64,    runner: ubuntu-22.04,       triple: x86_64-unknown-linux-gnu,  features: 'cuda,vulkan,wgpu', lib: libpie_server.so }
-          - { npm: linux-arm64,  runner: ubuntu-22.04-arm,   triple: aarch64-unknown-linux-gnu, features: 'cuda,vulkan,wgpu', lib: libpie_server.so }
-          - { npm: darwin-arm64, runner: macos-15,           triple: aarch64-apple-darwin,      features: 'metal,wgpu',       lib: libpie_server.dylib }
-          - { npm: win32-x64,    runner: windows-large-x64,  triple: x86_64-pc-windows-msvc,    features: 'cuda,vulkan',      lib: pie_server.dll }
+        target: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 120
     steps:
