@@ -66,6 +66,29 @@ packages for you: `list` says what each check needs. Checks that
 `pip install` do so into whichever Python is first on your PATH, so use a
 virtual environment.
 
+## Benchmarks
+
+`ci/ci.toml` declares them under `[bench.*]`: a command, a regex that pulls one
+number out of its output, a unit, and which direction is better. `bench.yml`
+runs them, compares against `ci/baselines/<platform>.json`, and posts a table
+on the PR:
+
+| benchmark | baseline | this run | change |
+| --- | ---: | ---: | ---: |
+| decode | 57.8 tok/s | 57.9 tok/s | +0.2% |
+| prefill | 227.0 tok/s | 330.0 tok/s | +45.4% |
+
+A metric that moves the wrong way by more than its `tolerance` fails the job.
+
+```sh
+python3 ci/bench.py run macos-arm64 --out results.json
+python3 ci/bench.py report results.json
+```
+
+Add the `benchmark` label to measure a PR; the nightly run always measures.
+Update a baseline by copying a green run's `results.json` over
+`ci/baselines/<platform>.json` in the same PR that earns the change.
+
 ## The GPU
 
 `cuda-gpu` is a self-hosted machine with an NVIDIA GPU. It never runs a
@@ -124,6 +147,8 @@ environments should each list required reviewers under
 |---|---|
 | `ci/ci.toml` | checks, platforms, levels and release machines |
 | `ci/ci.py` | plans the job matrix and runs checks locally |
+| `ci/bench.py`, `ci/baselines/` | measures the benchmarks and compares them |
+| `.github/workflows/bench.yml` | runs the benchmarks and posts the table |
 | `ci/ruleset.json`, `ci/apply-ruleset.sh` | branch protection for main |
 | `ci/hooks/pre-push` | the local hook `ci.py setup` installs |
 | `ci/lib/` | helpers the workflows call: crate lists, release uploads, the manylinux container setup |

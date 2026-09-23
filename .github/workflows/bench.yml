@@ -1,0 +1,71 @@
+name: Benchmarks
+
+# Measures what ci/ci.toml declares under [bench.*], compares against
+# ci/baselines/<platform>.json, and posts the table on the PR. A metric that
+# moves the wrong way past its tolerance fails the job. Opt in with the
+# `benchmark` label; the nightly run always measures.
+
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'benchmark'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      legs: ${{ steps.plan.outputs.legs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: ci
+      - id: plan
+        run: python3 ci/ci.py bench-plan
+
+  measure:
+    needs: plan
+    if: needs.plan.outputs.legs != '[]'
+    name: ${{ matrix.leg.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          triple: ${{ matrix.leg.triple }}
+          features: ${{ matrix.leg.features }}
+          cache-key: bench-${{ matrix.leg.platform }}
+      - run: python3 ci/bench.py run ${{ matrix.leg.platform }} --out bench-${{ matrix.leg.platform }}.json
+      - id: report
+        run: python3 ci/bench.py report bench-${{ matrix.leg.platform }}.json | tee report.md
+      - if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const body = require('fs').readFileSync('report.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const mine = (await github.rest.issues.listComments({ owner, repo, issue_number }))
+              .data.find(c => c.body.startsWith('### Benchmarks on `${{ matrix.leg.platform }}`'));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bench-${{ matrix.leg.platform }}
+          path: bench-${{ matrix.leg.platform }}.json

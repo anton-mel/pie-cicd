@@ -48,6 +48,7 @@ EVENT_LEVEL = {
     "workflow_dispatch": "nightly",
 }
 PLACEHOLDER = re.compile(r"(?<!\$)\{([a-z_]+)\}")
+BENCH_KEYS = {"run", "metric", "unit", "better", "platforms", "tolerance", "about"}
 CHECK_KEYS = {"about", "run", "timeout", "engines", "apt", "node", "python", "cache", "cache_paths", "env"}
 PLATFORM_KEYS = {"name", "runner", "triple", "engines", "vars", "advisory", "label", "self_hosted", *LEVELS}
 
@@ -107,6 +108,18 @@ def validate(config: dict) -> list[str]:
     for name in checks:
         if name not in listed:
             problems.append(f"check `{name}` is defined but no platform runs it")
+    names = {p.get("name") for p in config.get("platform", [])}
+    for name, bench in config.get("bench", {}).items():
+        for key in set(bench) - BENCH_KEYS:
+            problems.append(f"bench `{name}` has an unknown key `{key}`")
+        for key in ("run", "metric", "unit", "better", "platforms"):
+            if key not in bench:
+                problems.append(f"bench `{name}` has no `{key}`")
+        if bench.get("better") not in (None, "higher", "lower"):
+            problems.append(f"bench `{name}`: `better` is `higher` or `lower`")
+        for on in bench.get("platforms", []):
+            if on not in names:
+                problems.append(f"bench `{name}` names unknown platform `{on}`")
     return problems
 
 
@@ -249,6 +262,22 @@ def release(config: dict, kind: str, target: str | None, filters: str) -> list[d
     raise SystemExit("release: say `binaries` or `server`")
 
 
+def bench_legs(config: dict) -> list[dict]:
+    wanted = {on for bench in config.get("bench", {}).values() for on in bench["platforms"]}
+    legs = []
+    for p in config["platform"]:
+        if p["name"] in wanted:
+            legs.append({
+                "name": f"{p['name']} / bench",
+                "platform": p["name"],
+                "runner": p["runner"],
+                "triple": p["triple"],
+                "features": ",".join(p["engines"]),
+                "self_hosted": bool(p.get("self_hosted")),
+            })
+    return legs
+
+
 def cmd_list(config: dict) -> None:
     here = None
     try:
@@ -380,6 +409,7 @@ def main() -> int:
     pl.add_argument("--labels", default="[]", help="JSON list of the PR's label names")
     pl.add_argument("--level", choices=LEVELS, help="override the level the event implies")
     pl.add_argument("--only-labeled", action="store_true", help="only the platforms whose label the PR carries")
+    sub.add_parser("bench-plan")
     rel = sub.add_parser("release")
     rel.add_argument("kind", choices=["binaries", "server"])
     rel.add_argument("target", nargs="?")
@@ -409,6 +439,14 @@ def main() -> int:
         if args.check not in config["checks"]:
             raise SystemExit(f"no check `{args.check}`")
         sys.stdout.write(render(config, p, args.check))
+        return 0
+    if args.command == "bench-plan":
+        legs = bench_legs(config)
+        out = os.environ.get("GITHUB_OUTPUT")
+        if out:
+            with open(out, "a") as f:
+                f.write(f"legs={json.dumps(legs)}\n")
+        print(json.dumps(legs, indent=2))
         return 0
     if args.command == "plan":
         labels = json.loads(args.labels or "[]") or []

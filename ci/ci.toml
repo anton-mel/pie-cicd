@@ -205,9 +205,8 @@ triple = "aarch64-apple-darwin"
 engines = ["metal", "wgpu"]
 vars = { test_exclude = "--exclude engine-metal" }
 pr = ["build", "test", "no-engine", "test-metal"]
-# GitHub's macOS runners are virtual machines, and whether the Metal
-# kernels run correctly there is not yet established. One Metal test also
-# fails on real Apple hardware today.
+# The Metal tests pass on GitHub's macOS runners; one of them fails on real
+# Apple hardware today, so it stays advisory until that is fixed.
 advisory = ["test-metal"]
 
 [[platform]]
@@ -342,3 +341,36 @@ runner = "windows-large-x64"
 triple = "x86_64-pc-windows-msvc"
 features = "cuda,vulkan"
 lib = "pie_server.dll"
+
+# ------------------------------------------------------------ benchmarks --
+#
+# `ci/bench.py run <platform>` measures each of these, and `report` compares
+# them against `ci/baselines/<platform>.json` and prints a table. A metric
+# that moves the wrong way by more than `tolerance` percent fails the job.
+
+[bench.decode]
+about = "tokens a second the model writes, short prompt"
+run = "python3 scripts/bench/pie_bench.py --engine metal --max-tokens 256 --json"
+metric = "\"decode_tok_s\":\\s*([0-9.]+)"
+unit = "tok/s"
+better = "higher"
+tolerance = 5.0
+platforms = ["macos-arm64"]
+
+[bench.prefill]
+about = "tokens a second the model reads, long prompt"
+run = "python3 scripts/bench/pie_bench.py --engine metal --prompt-tokens 9333 --json"
+metric = "\"prefill_tok_s\":\\s*([0-9.]+)"
+unit = "tok/s"
+better = "higher"
+tolerance = 5.0
+platforms = ["macos-arm64"]
+
+[bench.qmm]
+about = "the quantized matmul, prefill shape"
+run = "cargo run -q --release -p engine-metal --example qmm_bench"
+metric = "([0-9.]+) GFLOP/s"
+unit = "GFLOP/s"
+better = "higher"
+tolerance = 3.0
+platforms = ["macos-arm64"]
